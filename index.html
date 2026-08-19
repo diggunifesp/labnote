@@ -203,7 +203,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     'AcUr','CaT','CaIon','CT','HDL','LDL','Trig','Cr','CK','FA','Glic','HbA1c','TSH',
     'PTH','K','Alb','T4L','TGO','TGP','Ur','B12','Vit D','Hb','Ht','VCM','HCM','RDW','Leuco',
     'Neut','Linf','Mono','Eos','Baso','Bast','Meta','Mielo','Promielo','GranImat','Blastos',
-    'Mieloblastos','Monoblastos','Promono','Prolinf','LinfAtip','Plasm','CélImat','CélAtip','Eritroblastos','Plaq'
+    'Mieloblastos','Monoblastos','Promono','Prolinf','LinfAtip','Plasm','CélImat','CélAtip','Eritroblastos','Plaq','INR','TTPA'
   ];
 
   const LEGACY_ANCHORS = [
@@ -212,7 +212,8 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     'ASPARTATO AMINO TRANSFERASE - TGO/AST','ALANINA AMINO TRANSFERASE - TGP/ALT','ALBUMINA',
     'FOSFATASE ALCALINA - FAL','CÁLCIO TOTAL','CÁLCIO IÔNICO','CÁLCIO IONIZADO','ÁCIDO ÚRICO','COLESTEROL TOTAL E FRAÇÕES',
     'TRIGLICÉRIDES','MICROALBUMINÚRIA','TIROXINA LIVRE - T4 LIVRE','URINA TIPO I',
-    'VITAMINA B12','PARATORMÔNIO - PTH','VITAMINA D - 25 HIDROXI'
+    'VITAMINA B12','PARATORMÔNIO - PTH','VITAMINA D - 25 HIDROXI',
+    'TEMPO DE PROTROMBINA - TP','TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA'
   ];
 
   const RESULT_WORDS = [
@@ -335,6 +336,71 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     if (!m) return null;
     const value = num(m[1]), min = num(m[2]), max = num(m[3]);
     return { value, min, max, abnormal: value < min || value > max };
+  }
+
+  function coagulationSection(text, kind) {
+    const raw = normalizeText(text);
+    const title = kind === 'TP'
+      ? /TEMPO DE PROTROMBINA\s*-\s*TP/i
+      : /TEMPO DE(?:\s+VALOR DE REFER[ÊE]NCIA)?\s+TROMBOPLASTINA PARCIAL ATIVAD[OA]\s*-\s*TTPA/i;
+
+    // First use the standard HSP clipboard layout (VALOR DE REFERÊNCIA + title).
+    const standardAnchor = kind === 'TP' ? 'TEMPO DE PROTROMBINA - TP' : 'TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA';
+    const standard = section(raw, standardAnchor);
+    if (standard) return standard;
+
+    // PDF/text extraction may invert the visual order (title + VALOR DE REFERÊNCIA).
+    const m = title.exec(raw);
+    if (!m) return '';
+    const start = m.index;
+    const tail = raw.slice(start);
+    const stops = [
+      tail.search(/\n\s*Liberado eletronicamente:/i),
+      tail.search(/\n\s*Libera[cç][aã]o eletr[oô]nica/i),
+      tail.search(/\n\s*Hash:/i),
+      tail.search(/\n\s*Respons[aá]veis? pelo Setor:/i)
+    ].filter(x => x > 0);
+    const end = stops.length ? Math.min(...stops) : Math.min(tail.length, 1800);
+    return tail.slice(0, end).trim();
+  }
+
+  function extractINR(text) {
+    const sec = coagulationSection(text, 'TP');
+    if (!sec) return null;
+    let m = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:R\.?\s*N\.?\s*I\.?|INR)\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?)/i);
+    if (m) {
+      const value = num(m[1]), lo = num(m[2]), hi = num(m[3]);
+      return makeResult('INR', rawPt(m[1]), value < Math.min(lo, hi) || value > Math.max(lo, hi), {
+        sourceName:'TEMPO DE PROTROMBINA - TP', sourceOverride:sec
+      });
+    }
+    m = sec.match(/(?:R\.?\s*N\.?\s*I\.?|INR)\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)(?:\s+([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?))?/i);
+    if (!m) return null;
+    const value = num(m[1]);
+    const abnormal = m[2] && m[3] ? (value < Math.min(num(m[2]), num(m[3])) || value > Math.max(num(m[2]), num(m[3]))) : false;
+    return makeResult('INR', rawPt(m[1]), abnormal, { sourceName:'TEMPO DE PROTROMBINA - TP', sourceOverride:sec });
+  }
+
+  function extractTTPA(text) {
+    const sec = coagulationSection(text, 'TTPA');
+    if (!sec) return null;
+
+    let tm = sec.match(/TEMPO\s*\(seg\)\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)\s*seg/i);
+    if (!tm) tm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:seg|s)\s*[^\n]{0,40}TEMPO\s*\(seg\)/i);
+    if (!tm) tm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*[^\n]{0,25}TEMPO\s*\(seg\)/i);
+
+    let rm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?)/i);
+    if (!rm) rm = sec.match(/R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)(?:\s+([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?))?/i);
+    if (!rm) rm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:R|RELA[CÇ][AÃ]O)\s*(?:\(\s*P\s*\/\s*N\s*\)|P\s*\/\s*N)/i);
+
+    if (!tm || !rm) return null;
+    const relation = num(rm[1]);
+    const abnormal = rm[2] && rm[3]
+      ? (relation < Math.min(num(rm[2]), num(rm[3])) || relation > Math.max(num(rm[2]), num(rm[3])))
+      : false;
+    return makeResult('TTPA', `${rawPt(tm[1])}s (${rawPt(rm[1])})`, abnormal, {
+      sourceName:'TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA', sourceOverride:sec
+    });
   }
 
   function extractTSH(text) {
@@ -770,6 +836,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       [/^POTASSIO$/, 'K'], [/^ALBUMINA$/, 'Alb'], [/TIROXINA LIVRE|T4 LIVRE/, 'T4L'],
       [/ASPARTATO AMINO TRANSFERASE|TGO|AST/, 'TGO'], [/ALANINA AMINO TRANSFERASE|TGP|ALT/, 'TGP'],
       [/^UREIA$/, 'Ur'], [/VITAMINA B12/, 'B12'], [/VITAMINA D.*25/, 'Vit D'],
+      [/TEMPO DE PROTROMBINA|\bR\.?\s*N\.?\s*I\.?\b|\bINR\b/, 'INR'], [/TROMBOPLASTINA PARCIAL ATIVAD|\bTTPA\b/, 'TTPA'],
       [/FATOR REUMATOIDE/, 'FR'], [/VELOCIDADE.*HEMOSSEDIMENT|HEMOSSEDIMENTACAO|\bVHS\b/, 'VHS'], [/ANTICORPOS ANTINUCLEARES|FATOR ANTINUCLEAR|\bFAN\b/, 'FAN'],
       [/TESTOSTERONA TOTAL/, 'TestoT'], [/TESTOSTERONA LIVRE/, 'TestoL'],
       [/RELACAO.*ALBUMINA.*CREATININA|ALBUMINA.*CREATININA.*URIN/, 'RAC'], [/CREATININA.*URIN|URIN.*CREATININA/, 'CrUr'], [/MICROALBUMIN/, 'Microalb'],
@@ -1313,7 +1380,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       'Cr':'CREATININA','CK':'CREATINOFOSFOQUINASE','FA':'FOSFATASE ALCALINA','Glic':'GLICOSE','HbA1c':'HEMOGLOBINA GLICADA',
       'TSH':'HORMONIO TIREOESTIMULANTE','PTH':'PARATORMONIO','K':'POTASSIO','Alb':'ALBUMINA','T4L':'TIROXINA LIVRE',
       'TGO':'ASPARTATO AMINO','TGP':'ALANINA AMINO','Ur':'UREIA','B12':'VITAMINA B12','Vit D':'VITAMINA D',
-      'Hb':'HEMOGLOBINA','Ht':'HEMATOCRITO','VCM':'VCM','HCM':'HCM','RDW':'RDW','Leuco':'LEUCOCITOS','Neut':'NEUTROFILOS','Linf':'LINFOCITOS','Mono':'MONOCITOS','Eos':'EOSINOFILOS','Baso':'BASOFILOS','Bast':'BASTONETES','Meta':'METAMIELOCITOS','Mielo':'MIELOCITOS','Promielo':'PROMIELOCITOS','GranImat':'GRANULOCITOS IMATUROS','Blastos':'BLASTOS','Mieloblastos':'MIELOBLASTOS','Monoblastos':'MONOBLASTOS','Promono':'PROMONOCITOS','Prolinf':'PROLINFOCITOS','LinfAtip':'LINFOCITOS','Plasm':'PLASMOCITOS','CélImat':'CELULAS IMATURAS','CélAtip':'CELULAS ATIPICAS','Eritroblastos':'ERITROBLASTOS','Plaq':'PLAQUETAS','Microalb':'MICROALBUMIN','CrUr':'CREATININA',
+      'Hb':'HEMOGLOBINA','Ht':'HEMATOCRITO','VCM':'VCM','HCM':'HCM','RDW':'RDW','Leuco':'LEUCOCITOS','Neut':'NEUTROFILOS','Linf':'LINFOCITOS','Mono':'MONOCITOS','Eos':'EOSINOFILOS','Baso':'BASOFILOS','Bast':'BASTONETES','Meta':'METAMIELOCITOS','Mielo':'MIELOCITOS','Promielo':'PROMIELOCITOS','GranImat':'GRANULOCITOS IMATUROS','Blastos':'BLASTOS','Mieloblastos':'MIELOBLASTOS','Monoblastos':'MONOBLASTOS','Promono':'PROMONOCITOS','Prolinf':'PROLINFOCITOS','LinfAtip':'LINFOCITOS','Plasm':'PLASMOCITOS','CélImat':'CELULAS IMATURAS','CélAtip':'CELULAS ATIPICAS','Eritroblastos':'ERITROBLASTOS','Plaq':'PLAQUETAS','INR':'R.N.I','TTPA':'TTPA','Microalb':'MICROALBUMIN','CrUr':'CREATININA',
       'VHS':'HEMOSSEDIMENT','FR':'FATOR REUMATOIDE','FAN':'FAN','TestoT':'TESTOSTERONA TOTAL','TestoL':'TESTOSTERONA LIVRE',
       'RAC':'RELACAO ALBUMINA/CREATININA','Cél':'CELULAS','Hemác':'HEMACIAS','Prot':'PROTEINA','Lact':'LACTATO','LDH':'LDH','ADA':'ADA',
       'pH':'PH','PCO2':'PCO2','PO2':'PO2','BIC':'HCO3','SpO2':'SPO2','BE':'BASE',
@@ -1332,6 +1399,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       'K':'POTÁSSIO','Alb':'ALBUMINA','T4L':'TIROXINA LIVRE - T4 LIVRE','TGO':'ASPARTATO AMINO TRANSFERASE - TGO/AST',
       'TGP':'ALANINA AMINO TRANSFERASE - TGP/ALT','Ur':'UREIA','B12':'VITAMINA B12','Vit D':'VITAMINA D - 25 HIDROXI',
       'Hb':'HEMOGRAMA COMPLETO','Ht':'HEMOGRAMA COMPLETO','VCM':'HEMOGRAMA COMPLETO','HCM':'HEMOGRAMA COMPLETO','RDW':'HEMOGRAMA COMPLETO','Leuco':'HEMOGRAMA COMPLETO','Neut':'HEMOGRAMA COMPLETO','Linf':'HEMOGRAMA COMPLETO','Mono':'HEMOGRAMA COMPLETO','Eos':'HEMOGRAMA COMPLETO','Baso':'HEMOGRAMA COMPLETO','Bast':'HEMOGRAMA COMPLETO','Meta':'HEMOGRAMA COMPLETO','Mielo':'HEMOGRAMA COMPLETO','Promielo':'HEMOGRAMA COMPLETO','GranImat':'HEMOGRAMA COMPLETO','Blastos':'HEMOGRAMA COMPLETO','Mieloblastos':'HEMOGRAMA COMPLETO','Monoblastos':'HEMOGRAMA COMPLETO','Promono':'HEMOGRAMA COMPLETO','Prolinf':'HEMOGRAMA COMPLETO','LinfAtip':'HEMOGRAMA COMPLETO','Plasm':'HEMOGRAMA COMPLETO','CélImat':'HEMOGRAMA COMPLETO','CélAtip':'HEMOGRAMA COMPLETO','Eritroblastos':'HEMOGRAMA COMPLETO','Plaq':'HEMOGRAMA COMPLETO',
+      'INR':'TEMPO DE PROTROMBINA - TP','TTPA':'TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA',
       'CT':'COLESTEROL TOTAL E FRAÇÕES','HDL':'COLESTEROL TOTAL E FRAÇÕES','LDL':'COLESTEROL TOTAL E FRAÇÕES','Trig':'COLESTEROL TOTAL E FRAÇÕES',
       'Microalb':'MICROALBUMINÚRIA'
     };
@@ -1748,6 +1816,8 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     assign(extractUrea(text));
     assign(extractB12(text));
     assign(extractVitD(text));
+    assign(extractINR(text));
+    assign(extractTTPA(text));
     Object.assign(found, extractHemogram(text));
     const standaloneTrig = extractTrigStandalone(text);
     if (!found.Trig && standaloneTrig) assign(standaloneTrig);
@@ -2126,6 +2196,40 @@ Coleta:06/04/2026 11:48`);
     check('Mielócitos detectados são exibidos separadamente', hemogramShiftPositive.blood.some(x => x.abbr === 'Mielo' && /30/.test(x.value)));
     check('Metamielócitos permanecem distintos de mielócitos', hemogramShiftPositive.blood.some(x => x.abbr === 'Meta' && /60/.test(x.value)));
     check('Blastos detectados são sempre exibidos', hemogramShiftPositive.blood.some(x => x.abbr === 'Blastos' && /12/.test(x.value)));
+
+    const coag = compileReport(`VALOR DE REFERÊNCIATEMPO DE PROTROMBINA - TP
+Método: COAGULOMÉTRICO
+PLASMA CITRATADOMaterial:
+TEMPO (seg) 14,5 seg
+87 ATIVIDADE (%) Superior a 70 %
+1,10 R.N.I. 0,80 a 1,20
+Coleta:18/08/2026 13:57
+VALOR DE REFERÊNCIATEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA
+Método: COAGULOMÉTRICO
+PLASMA CITRATADOMaterial:
+TEMPO (seg) 33,6 seg
+1,00 R (relação P/N) 0,80 a 1,20
+Coleta:18/08/2026 13:57`);
+    const inr = coag.blood.find(x => x.abbr === 'INR');
+    const ttpa = coag.blood.find(x => x.abbr === 'TTPA');
+    check('TP compila apenas INR', !!inr && inr.value === '1,10' && !coag.blood.some(x => x.abbr === 'TP'));
+    check('TTPA compila tempo e relação P/N', !!ttpa && ttpa.value === '33,6s (1,00)');
+    check('Coagulograma normal não gera pendência', !!inr && !!ttpa && !inr.needsReview && !ttpa.needsReview);
+
+    const coagPdfOrder = compileReport(`TEMPO DE PROTROMBINA - TP VALOR DE REFERÊNCIA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+TEMPO (seg) 14,5 seg
+87 ATIVIDADE (%) % Superior a 70 %
+1,10 R.N.I. 0,80 a 1,20
+Liberado eletronicamente: TESTE 18/08/2026 14:26:22 Coleta:18/08/2026 13:57
+TEMPO DE VALOR DE REFERÊNCIA TROMBOPLASTINA PARCIAL ATIVADO - TTPA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+TEMPO (seg) 33,6 seg
+1,00 R (relação P/N) 0,80 a 1,20
+Liberado eletronicamente: TESTE 18/08/2026 14:26:23 Coleta:18/08/2026 13:57`);
+    check('Coagulograma tolera ordem textual do PDF', coagPdfOrder.blood.some(x => x.abbr === 'INR' && x.value === '1,10') && coagPdfOrder.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
 
     return { passed: total - failures.length, total, failures };
   }
