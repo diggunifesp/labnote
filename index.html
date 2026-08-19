@@ -457,6 +457,11 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       const after = line.slice(lm.index + lm[0].length);
       const beforeNums = [...before.matchAll(/-?[0-9]+(?:[.,][0-9]+)?/g)].map(m => m[0]);
 
+      // HSP: 0,98 0,80 a 1,20R (relação P/N) -> 0,98 é o resultado,
+      // não o limite superior 1,20 imediatamente antes do rótulo.
+      const beforeTriplet = before.match(new RegExp('(' + n + ')\\s+(' + n + ')\\s*(?:a|-)\\s*(' + n + ')\\s*$', 'i'));
+      if (beforeTriplet) return beforeTriplet[1];
+
       // R (relação P/N) 1,00 0,80 a 1,20  -> 1,00 é o resultado.
       let m = after.match(new RegExp('^\\s*(' + n + ')\\s+(' + n + ')\\s*(?:a|-)\\s*(' + n + ')', 'i'));
       if (m) return m[1];
@@ -503,9 +508,16 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     const n = '-?[0-9]+(?:[.,][0-9]+)?';
     let rawValue = null;
 
-    // 1,10 R.N.I. ... (o valor está imediatamente antes do rótulo).
-    let m = sec.match(new RegExp('(' + n + ')[ \t]*(?:R[ \t]*\\.?[ \t]*N[ \t]*\\.?[ \t]*I[ \t]*\\.?|\\bINR\\b)', 'i'));
+    // HSP: resultado + referência podem vir todos antes do rótulo:
+    // 0,94 0,80 a 1,20R.N.I. -> o primeiro número é o resultado.
+    let m = sec.match(new RegExp('(' + n + ')\\s+(' + n + ')\\s*(?:a|-)\\s*(' + n + ')[ \\t]*(?:R[ \\t]*\\.?[ \\t]*N[ \\t]*\\.?[ \\t]*I[ \\t]*\\.?|\\bINR\\b)', 'i'));
     if (m) rawValue = m[1];
+
+    // 1,10 R.N.I. ... (o valor está imediatamente antes do rótulo).
+    if (!rawValue) {
+      m = sec.match(new RegExp('(' + n + ')[ \\t]*(?:R[ \\t]*\\.?[ \\t]*N[ \\t]*\\.?[ \\t]*I[ \\t]*\\.?|\\bINR\\b)', 'i'));
+      if (m) rawValue = m[1];
+    }
 
     // R.N.I. 1,10 ... / INR 1,10 ...
     if (!rawValue) {
@@ -950,6 +962,46 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     return out;
   }
 
+  function parseProteinFractionsPanel(block) {
+    if (!/PROTEINAS TOTAIS E FRACOES/.test(fold(block.name || ''))) return [];
+    const out = [];
+    const panelText = auditSafeBlock(block.text);
+    const defs = [
+      ['Prot', ['PROTEINAS TOTAIS']],
+      ['Albumina', ['ALBUMINA']],
+      ['Globulina', ['GLOBULINA']]
+    ];
+    for (const [abbr, aliases] of defs) {
+      const r = localNumericMetric(panelText, aliases, abbr);
+      if (!r) continue;
+      r.sourceName = block.name;
+      r.sourceOverride = panelText;
+      r.panelSpecific = true;
+      pushUnique(out, r);
+    }
+    return out;
+  }
+
+  function parseBilirubinFractionsPanel(block) {
+    if (!/BILIRRUBINAS TOTAIS E FRACOES/.test(fold(block.name || ''))) return [];
+    const out = [];
+    const panelText = auditSafeBlock(block.text);
+    const defs = [
+      ['BT', ['BILIRRUBINA TOTAL']],
+      ['BD', ['BILIRRUBINA DIRETA']],
+      ['BI', ['BILIRRUBINA INDIRETA']]
+    ];
+    for (const [abbr, aliases] of defs) {
+      const r = localNumericMetric(panelText, aliases, abbr);
+      if (!r) continue;
+      r.sourceName = block.name;
+      r.sourceOverride = panelText;
+      r.panelSpecific = true;
+      pushUnique(out, r);
+    }
+    return out;
+  }
+
   function extractUrine(text) {
     const sec = section(text, 'URINA TIPO I');
     if (!sec) return { abnormalItems: [], parsed: false };
@@ -1027,8 +1079,9 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       [/^CREATININA$/, 'Cr'], [/CREATINOFOSFOQUINASE|\bCK\b/, 'CK'], [/FOSFATASE ALCALINA|\bFAL\b/, 'FA'],
       [/GLICOSE DE JEJUM|^GLICOSE$/, 'Glic'], [/HEMOGLOBINA GLICADA|HBA1C/, 'HbA1c'],
       [/HORMONIO TIREOESTIMULANTE|\bTSH\b/, 'TSH'], [/PARATORMONIO|\bPTH\b/, 'PTH'],
-      [/^POTASSIO$/, 'K'], [/^ALBUMINA$/, 'Alb'], [/TIROXINA LIVRE|T4 LIVRE/, 'T4L'],
+      [/^POTASSIO$/, 'K'], [/^SODIO$/, 'Na'], [/^ALBUMINA$/, 'Alb'], [/TIROXINA LIVRE|T4 LIVRE/, 'T4L'],
       [/ASPARTATO AMINO TRANSFERASE|TGO|AST/, 'TGO'], [/ALANINA AMINO TRANSFERASE|TGP|ALT/, 'TGP'],
+      [/GAMA GLUTAMIL TRANSFERASE|\bGGT\b/, 'GGT'], [/^FOSFORO$/, 'P'], [/^MAGNESIO$/, 'Mg'],
       [/^UREIA$/, 'Ur'], [/VITAMINA B12/, 'B12'], [/VITAMINA D.*25/, 'Vit D'],
       [/FATOR REUMATOIDE/, 'FR'], [/VELOCIDADE.*HEMOSSEDIMENT|HEMOSSEDIMENTACAO|\bVHS\b/, 'VHS'], [/ANTICORPOS ANTINUCLEARES|FATOR ANTINUCLEAR|\bFAN\b/, 'FAN'],
       [/TESTOSTERONA TOTAL/, 'TestoT'], [/TESTOSTERONA LIVRE/, 'TestoL'],
@@ -1573,7 +1626,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       'AcUr':'ACIDO URICO','CaT':'CALCIO TOTAL','CaIon':'CALCIO ION','CT':'COLESTEROL TOTAL','HDL':'COLESTEROL HDL','LDL':'COLESTEROL LDL','Trig':'TRIGLICER',
       'Cr':'CREATININA','CK':'CREATINOFOSFOQUINASE','FA':'FOSFATASE ALCALINA','Glic':'GLICOSE','HbA1c':'HEMOGLOBINA GLICADA',
       'TSH':'HORMONIO TIREOESTIMULANTE','PTH':'PARATORMONIO','K':'POTASSIO','Alb':'ALBUMINA','T4L':'TIROXINA LIVRE',
-      'TGO':'ASPARTATO AMINO','TGP':'ALANINA AMINO','Ur':'UREIA','B12':'VITAMINA B12','Vit D':'VITAMINA D',
+      'TGO':'ASPARTATO AMINO','TGP':'ALANINA AMINO','Na':'SODIO','GGT':'GAMA GLUTAMIL','P':'FOSFORO','Mg':'MAGNESIO','Prot':'PROTEINAS TOTAIS','Albumina':'ALBUMINA','Globulina':'GLOBULINA','BT':'BILIRRUBINA TOTAL','BD':'BILIRRUBINA DIRETA','BI':'BILIRRUBINA INDIRETA','Ur':'UREIA','B12':'VITAMINA B12','Vit D':'VITAMINA D',
       'Hb':'HEMOGLOBINA','Ht':'HEMATOCRITO','VCM':'VCM','HCM':'HCM','RDW':'RDW','Leuco':'LEUCOCITOS','Neut':'NEUTROFILOS','Linf':'LINFOCITOS','Mono':'MONOCITOS','Eos':'EOSINOFILOS','Baso':'BASOFILOS','Bast':'BASTONETES','Meta':'METAMIELOCITOS','Mielo':'MIELOCITOS','Promielo':'PROMIELOCITOS','GranImat':'GRANULOCITOS IMATUROS','Blastos':'BLASTOS','Mieloblastos':'MIELOBLASTOS','Monoblastos':'MONOBLASTOS','Promono':'PROMONOCITOS','Prolinf':'PROLINFOCITOS','LinfAtip':'LINFOCITOS','Plasm':'PLASMOCITOS','CélImat':'CELULAS IMATURAS','CélAtip':'CELULAS ATIPICAS','Eritroblastos':'ERITROBLASTOS','Plaq':'PLAQUETAS','INR':'R.N.I','TTPA':'TTPA','Microalb':'MICROALBUMIN','CrUr':'CREATININA',
       'VHS':'HEMOSSEDIMENT','FR':'FATOR REUMATOIDE','FAN':'FAN','TestoT':'TESTOSTERONA TOTAL','TestoL':'TESTOSTERONA LIVRE',
       'RAC':'RELACAO ALBUMINA/CREATININA','Cél':'CELULAS','Hemác':'HEMACIAS','Prot':'PROTEINA','Lact':'LACTATO','LDH':'LDH','ADA':'ADA',
@@ -1941,6 +1994,8 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       let ok = false;
       if (/HEMOGRAMA COMPLETO/.test(bn)) ok = ['Hb','Ht','VCM','HCM','RDW','Leuco','Plaq'].some(a => report.blood.some(r => r.abbr === a));
       else if (/COLESTEROL TOTAL E FRACOES/.test(bn)) ok = ['CT','HDL','LDL','Trig'].some(a => report.blood.some(r => r.abbr === a));
+      else if (/PROTEINAS TOTAIS E FRACOES/.test(bn)) ok = ['Prot','Albumina','Globulina'].every(a => report.blood.some(r => r.abbr === a && fold(r.sourceName || '') === bn));
+      else if (/BILIRRUBINAS TOTAIS E FRACOES/.test(bn)) ok = ['BT','BD','BI'].every(a => report.blood.some(r => r.abbr === a && fold(r.sourceName || '') === bn));
       else if (/URINA TIPO I/.test(bn)) ok = !!report.urine?.u1?.parsed;
       else {
         const alias = aliasForName(block.name);
@@ -1951,7 +2006,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       if (ok) {
         accountedBlocks++;
         const cat = categoryForBlock(block);
-        const knownPanel = /HEMOGRAMA COMPLETO|COLESTEROL TOTAL E FRACOES|URINA TIPO I|RELACAO.*ALBUMINA.*CREATININA|PAINEL.*VIRAL/.test(bn) || ['csf','pleural','culture'].includes(cat);
+        const knownPanel = /HEMOGRAMA COMPLETO|COLESTEROL TOTAL E FRACOES|PROTEINAS TOTAIS E FRACOES|BILIRRUBINAS TOTAIS E FRACOES|URINA TIPO I|RELACAO.*ALBUMINA.*CREATININA|PAINEL.*VIRAL/.test(bn) || ['csf','pleural','culture'].includes(cat);
         if (!knownPanel) {
           const clean = auditSafeBlock(block.text);
           const resultLabels = (clean.match(/RESULTADO/gi) || []).length;
@@ -2084,6 +2139,16 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       const racPanel = parseAlbuminCreatininePanel(block);
       if (racPanel.length) {
         racPanel.forEach(r => pushUnique(urine.assays, r));
+        continue;
+      }
+
+      if (/PROTEINAS TOTAIS E FRACOES/.test(bn)) {
+        parseProteinFractionsPanel(block).forEach(r => pushUnique(blood, r));
+        continue;
+      }
+
+      if (/BILIRRUBINAS TOTAIS E FRACOES/.test(bn)) {
+        parseBilirubinFractionsPanel(block).forEach(r => pushUnique(blood, r));
         continue;
       }
 
@@ -2515,6 +2580,76 @@ Material: PLASMA CITRATADO
 resultado ilegível
 Coleta:18/08/2026 13:57`);
     check('TTPA presente mas não extraído obrigatoriamente gera pendência', coagMissingMustReview.qa?.reviews.some(x => /Bloco não compilado: TTPA/i.test(x.label)));
+
+
+    const extendedChemistry = compileReport(`VALOR DE REFERÊNCIASÓDIO
+ELETRODO ION-SELETIVOMétodo:
+SOROMaterial:
+139 136 a 145 mmol/LRESULTADO mmol/L
+Coleta:21/07/2026 07:42
+VALOR DE REFERÊNCIAGAMA GLUTAMIL TRANSFERASE - GGT
+ENZIMÁTICOMétodo:
+SOROMaterial:
+27,0 Até 60,0 U/LRESULTADO U/L
+Coleta:21/07/2026 07:42
+VALOR DE REFERÊNCIAFÓSFORO
+COLORIMÉTRICOMétodo:
+SOROMaterial:
+4,50 2,5 a 4,5 mg/dL
+RESULTADO mg/dL
+Coleta:21/07/2026 07:42
+VALOR DE REFERÊNCIAMAGNÉSIO
+COLORIMÉTRICOMétodo:
+SOROMaterial:
+2,1 1,6 a 2,4 mg/dLRESULTADO mg/dL
+Coleta:21/07/2026 07:42`);
+    check('Sódio é abreviado como Na', extendedChemistry.blood.some(x => x.abbr === 'Na' && x.value === '139'));
+    check('Gama-GT é abreviada como GGT', extendedChemistry.blood.some(x => x.abbr === 'GGT' && x.value === '27,0'));
+    check('Fósforo é abreviado como P', extendedChemistry.blood.some(x => x.abbr === 'P' && x.value === '4,50'));
+    check('Magnésio é abreviado como Mg', extendedChemistry.blood.some(x => x.abbr === 'Mg' && x.value === '2,1'));
+
+    const proteinPanel = compileReport(`VALOR DE REFERÊNCIAPROTEÍNAS TOTAIS E FRAÇÕES
+COLORIMÉTRICOMétodo:
+SOROMaterial:
+8,0 6,4 a 8,3 g/dLPROTEÍNAS TOTAIS g/dL
+4,5 3,5 a 5,2 g/dLALBUMINA g/dL
+3,5 1,0 a 3,0 g/dLGLOBULINA g/dL
+1,3 0,9 a 2,0RELAÇÃO ALBUMINA/GLOBULINA
+Coleta:21/07/2026 07:42`);
+    check('Proteínas totais vira Prot', proteinPanel.blood.some(x => x.abbr === 'Prot' && x.value === '8,0'));
+    check('Albumina do painel é preservada como Albumina', proteinPanel.blood.some(x => x.abbr === 'Albumina' && x.value === '4,5'));
+    check('Globulina do painel é extraída e classificada', proteinPanel.blood.some(x => x.abbr === 'Globulina' && x.value === '3,5' && x.abnormal));
+    check('Painel de proteínas não gera pendência de bloco', !proteinPanel.qa?.reviews.some(x => /PROTEINAS TOTAIS E FRACOES/.test(fold(x.label + ' ' + x.reasons.join(' ')))));
+
+    const bilirubinPanel = compileReport(`VALOR DE REFERÊNCIABILIRRUBINAS TOTAIS E FRAÇÕES
+COLORIMÉTRICOMétodo:
+SOROMaterial:
+0,51 Adultos: até 1,2 mg/dL
+Crianças = 1 mês: até 1,0 mg/dL
+BILIRRUBINA TOTAL mg/dL
+0,28 Crianças acima de 1 mês e adultos:
+inferior a 0,30 mg/dL
+BILIRRUBINA DIRETA mg/dL
+0,23 0,1 a 0,6 mg/dLBILIRRUBINA INDIRETA mg/dL
+Coleta:21/07/2026 07:42`);
+    check('Bilirrubina total vira BT', bilirubinPanel.blood.some(x => x.abbr === 'BT' && x.value === '0,51'));
+    check('Bilirrubina direta vira BD', bilirubinPanel.blood.some(x => x.abbr === 'BD' && x.value === '0,28'));
+    check('Bilirrubina indireta vira BI', bilirubinPanel.blood.some(x => x.abbr === 'BI' && x.value === '0,23'));
+    check('Painel de bilirrubinas não gera pendência de bloco', !bilirubinPanel.qa?.reviews.some(x => /BILIRRUBINAS TOTAIS E FRACOES/.test(fold(x.label + ' ' + x.reasons.join(' ')))));
+
+    const coagHspReferenceBeforeLabel = compileReport(`VALOR DE REFERÊNCIATEMPO DE PROTROMBINA - TP
+PLASMA CITRATADOMaterial:
+12,8TEMPO (seg) seg
+110 Superior a 70 %ATIVIDADE (%) %
+0,94 0,80 a 1,20R.N.I.
+Coleta:21/07/2026 07:42
+VALOR DE REFERÊNCIATEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA
+PLASMA CITRATADOMaterial:
+32,9TEMPO (seg) seg
+0,98 0,80 a 1,20R (relação P/N)
+Coleta:21/07/2026 07:42`);
+    check('INR HSP não confunde resultado com limite superior', coagHspReferenceBeforeLabel.blood.some(x => x.abbr === 'INR' && x.value === '0,94'));
+    check('TTPA HSP não confunde relação com limite superior', coagHspReferenceBeforeLabel.blood.some(x => x.abbr === 'TTPA' && x.value === '32,9s (0,98)'));
 
     return { passed: total - failures.length, total, failures };
   }
