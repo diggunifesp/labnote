@@ -182,6 +182,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
           <li>Cálcio iônico/ionizado é resumido como <strong>CaIon</strong>.</li>
           <li>No hemograma, <strong>VCM, HCM e RDW</strong> são sempre incluídos; neutrófilos, linfócitos, monócitos, eosinófilos e basófilos só aparecem quando fora da referência do próprio laudo.</li>
           <li>Populações de desvio ou células imaturas/atípicas (como bastonetes, metamielócitos, mielócitos, promielócitos e blastos) são sempre mostradas quando efetivamente detectadas.</li>
+          <li>No coagulograma, o Tempo de Protrombina é resumido apenas como <strong>INR</strong>; o TTPA é mostrado como <strong>TTPA tempo em segundos (relação P/N)</strong>.</li>
           <li>Na sorologia, teste treponêmico e VDRL sérico são padronizados como <strong>Sífilis-Treponêmico</strong> e <strong>Sífilis-VDRL</strong> e ficam juntos quando ambos estão presentes.</li>
           <li>O programa nunca infere sexo, idade, diagnóstico ou contexto clínico para escolher uma referência.</li>
           <li>Cada resultado é rastreável até um trecho desidentificado do laudo e passa por uma segunda checagem textual independente.</li>
@@ -212,8 +213,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     'ASPARTATO AMINO TRANSFERASE - TGO/AST','ALANINA AMINO TRANSFERASE - TGP/ALT','ALBUMINA',
     'FOSFATASE ALCALINA - FAL','CÁLCIO TOTAL','CÁLCIO IÔNICO','CÁLCIO IONIZADO','ÁCIDO ÚRICO','COLESTEROL TOTAL E FRAÇÕES',
     'TRIGLICÉRIDES','MICROALBUMINÚRIA','TIROXINA LIVRE - T4 LIVRE','URINA TIPO I',
-    'VITAMINA B12','PARATORMÔNIO - PTH','VITAMINA D - 25 HIDROXI',
-    'TEMPO DE PROTROMBINA - TP','TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA'
+    'VITAMINA B12','PARATORMÔNIO - PTH','VITAMINA D - 25 HIDROXI'
   ];
 
   const RESULT_WORDS = [
@@ -338,69 +338,263 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     return { value, min, max, abnormal: value < min || value > max };
   }
 
-  function coagulationSection(text, kind) {
+  // Coagulograma: extrator independente do parser genérico de blocos.
+  // Alguns navegadores/PDFs colam a tabela inteira em uma única linha. Nesses casos,
+  // a limpeza linha-a-linha usada no restante do laudo não pode ser aplicada antes da extração.
+  function coagulationSafeSection(text, kind) {
     const raw = normalizeText(text);
-    const title = kind === 'TP'
-      ? /TEMPO DE PROTROMBINA\s*-\s*TP/i
-      : /TEMPO DE(?:\s+VALOR DE REFER[ÊE]NCIA)?\s+TROMBOPLASTINA PARCIAL ATIVAD[OA]\s*-\s*TTPA/i;
+    const titleRx = kind === 'TP'
+      ? /TEMPO\s+DE\s+PROTROMBINA(?:\s+VALOR\s+DE\s+REFER[ÊE]NCIA)?\s*-?\s*TP/i
+      : /TEMPO\s+DE[\s\S]{0,90}?TROMBOPLASTINA\s+PARCIAL[\s\S]{0,90}?ATIVAD[OA][\s\S]{0,45}?\bTTPA\b/i;
+    const fallbackRx = kind === 'TP'
+      ? /R\s*\.?\s*N\s*\.?\s*I\s*\.?|\bINR\b/i
+      : /R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)|\bTTPA\b/i;
 
-    // First use the standard HSP clipboard layout (VALOR DE REFERÊNCIA + title).
-    const standardAnchor = kind === 'TP' ? 'TEMPO DE PROTROMBINA - TP' : 'TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA';
-    const standard = section(raw, standardAnchor);
-    if (standard) return standard;
+    let titleMatch = titleRx.exec(raw);
+    let anchorMatch = titleMatch || fallbackRx.exec(raw);
+    if (!anchorMatch) return '';
 
-    // PDF/text extraction may invert the visual order (title + VALOR DE REFERÊNCIA).
-    const m = title.exec(raw);
-    if (!m) return '';
-    const start = m.index;
-    const tail = raw.slice(start);
-    const stops = [
-      tail.search(/\n\s*Liberado eletronicamente:/i),
-      tail.search(/\n\s*Libera[cç][aã]o eletr[oô]nica/i),
-      tail.search(/\n\s*Hash:/i),
-      tail.search(/\n\s*Respons[aá]veis? pelo Setor:/i)
-    ].filter(x => x > 0);
-    const end = stops.length ? Math.min(...stops) : Math.min(tail.length, 1800);
+    // Quando o título não é reconhecido literalmente, o fallback pode cair em "TTPA" ou
+    // na relação P/N. Nesse caso, preserve contexto anterior, mas NUNCA deixe uma linha de
+    // "Liberado eletronicamente" anterior ao próprio TTPA encerrar a seção prematuramente.
+    let start = titleMatch ? titleMatch.index : Math.max(0, anchorMatch.index - 500);
+    let tail = raw.slice(start);
+    let anchorPos = titleMatch ? 0 : anchorMatch.index - start;
+
+    // Se o título aparecer dentro da janela de fallback, reposicione exatamente nele.
+    const titleInTail = titleRx.exec(tail);
+    if (titleInTail) {
+      tail = tail.slice(titleInTail.index);
+      anchorPos = 0;
+    }
+
+    const stops = [];
+    const stopPatterns = [
+      /Liberado\s+eletronicamente\s*:/i,
+      /Libera[cç][aã]o\s+eletr[oô]nica/i,
+      /\bHash\s*:/i,
+      /Respons[aá]veis?\s+pelo\s+Setor\s*:/i,
+      /A correta interpreta[cç][aã]o dos exames laboratoriais/i
+    ];
+    for (const rx of stopPatterns) {
+      const sm = rx.exec(tail);
+      if (sm && sm.index > anchorPos) stops.push(sm.index);
+    }
+    if (kind === 'TP') {
+      const next = /TEMPO\s+DE[\s\S]{0,90}?TROMBOPLASTINA\s+PARCIAL[\s\S]{0,90}?ATIVAD[OA][\s\S]{0,45}?\bTTPA\b/i.exec(tail);
+      if (next && next.index > anchorPos) stops.push(next.index);
+    }
+    const end = stops.length ? Math.min(...stops) : Math.min(tail.length, 2400);
     return tail.slice(0, end).trim();
   }
 
-  function extractINR(text) {
-    const sec = coagulationSection(text, 'TP');
-    if (!sec) return null;
-    let m = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:R\.?\s*N\.?\s*I\.?|INR)\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?)/i);
-    if (m) {
-      const value = num(m[1]), lo = num(m[2]), hi = num(m[3]);
-      return makeResult('INR', rawPt(m[1]), value < Math.min(lo, hi) || value > Math.max(lo, hi), {
-        sourceName:'TEMPO DE PROTROMBINA - TP', sourceOverride:sec
-      });
+  function coagulationColumnValues(sec, labelRegexes) {
+    const lines = normalizeText(sec).split('\n').map(x => x.trim()).filter(Boolean);
+    const indices = labelRegexes.map(rx => lines.findIndex(line => rx.test(line)));
+    if (indices.some(x => x < 0)) return null;
+    const lastLabel = Math.max(...indices);
+    const values = [];
+    for (let i = lastLabel + 1; i < Math.min(lines.length, lastLabel + 20); i++) {
+      const m = lines[i].match(/^(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:seg|s|%)?$/i);
+      if (m) values.push(m[1]);
+      if (values.length >= labelRegexes.length) break;
     }
-    m = sec.match(/(?:R\.?\s*N\.?\s*I\.?|INR)\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)(?:\s+([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?))?/i);
-    if (!m) return null;
-    const value = num(m[1]);
-    const abnormal = m[2] && m[3] ? (value < Math.min(num(m[2]), num(m[3])) || value > Math.max(num(m[2]), num(m[3]))) : false;
-    return makeResult('INR', rawPt(m[1]), abnormal, { sourceName:'TEMPO DE PROTROMBINA - TP', sourceOverride:sec });
+    return values.length >= labelRegexes.length ? values : null;
+  }
+
+  function coagulationValueNearLabel(sec, labelRx, options = {}) {
+    const lines = normalizeText(sec).split('\n').map(x => x.trim()).filter(Boolean);
+    const preferAfter = options.preferAfter !== false;
+    for (let i = 0; i < lines.length; i++) {
+      const rx = new RegExp(labelRx.source, labelRx.flags.replace('g',''));
+      const lm = rx.exec(lines[i]);
+      if (!lm) continue;
+
+      const before = lines[i].slice(0, lm.index);
+      const after = lines[i].slice(lm.index + lm[0].length);
+      const nums = str => [...str.matchAll(/-?[0-9]+(?:[.,][0-9]+)?/g)].map(m => m[0]);
+      const beforeNums = nums(before);
+      const afterNums = nums(after);
+
+      // Em linhas como "1,00 R (relação P/N) 0,80 a 1,20", o resultado está antes.
+      // Em linhas como "R (relação P/N) 1,00 0,80 a 1,20", está depois.
+      if (preferAfter && afterNums.length) return afterNums[0];
+      if (beforeNums.length) return beforeNums[beforeNums.length - 1];
+      if (!preferAfter && afterNums.length) return afterNums[0];
+
+      if (options.neighbors) {
+        const previous = () => {
+          for (let j = i - 1; j >= Math.max(0, i - 2); j--) {
+            const m = lines[j].match(/^\s*(-?[0-9]+(?:[.,][0-9]+)?)(?:\s|$)/);
+            if (m) return m[1];
+          }
+          return null;
+        };
+        const next = () => {
+          for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j++) {
+            const fj = fold(lines[j]);
+            if (j > i + 1 && /(TEMPO\s*\(SEG\)|ATIVIDADE|R\s*\(|R\.N\.I|\bINR\b)/.test(fj)) break;
+            const m = lines[j].match(/^\s*(-?[0-9]+(?:[.,][0-9]+)?)(?:\s|$)/);
+            if (m) return m[1];
+          }
+          return null;
+        };
+        const neighbor = options.preferPreviousNeighbor ? (previous() || next()) : (next() || previous());
+        if (neighbor) return neighbor;
+      }
+    }
+    return null;
+  }
+
+  function coagulationRelationValue(sec) {
+    const lines = normalizeText(sec).split('\n').map(x => x.trim()).filter(Boolean);
+    const labelRx = /R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)/i;
+    const n = '-?[0-9]+(?:[.,][0-9]+)?';
+    for (const line of lines) {
+      const lm = labelRx.exec(line);
+      if (!lm) continue;
+      const before = line.slice(0, lm.index);
+      const after = line.slice(lm.index + lm[0].length);
+      const beforeNums = [...before.matchAll(/-?[0-9]+(?:[.,][0-9]+)?/g)].map(m => m[0]);
+
+      // R (relação P/N) 1,00 0,80 a 1,20  -> 1,00 é o resultado.
+      let m = after.match(new RegExp('^\\s*(' + n + ')\\s+(' + n + ')\\s*(?:a|-)\\s*(' + n + ')', 'i'));
+      if (m) return m[1];
+
+      // R (relação P/N) 0,80 a 1,20, com 1,00 imediatamente antes do rótulo.
+      m = after.match(new RegExp('^\\s*(' + n + ')\\s*(?:a|-)\\s*(' + n + ')', 'i'));
+      if (m && beforeNums.length) return beforeNums[beforeNums.length - 1];
+
+      // R (relação P/N) 1,00, sem referência na mesma linha.
+      m = after.match(new RegExp('^\\s*(' + n + ')(?:\\s|$)', 'i'));
+      if (m) return m[1];
+
+      // 1,00 R (relação P/N)
+      if (beforeNums.length) return beforeNums[beforeNums.length - 1];
+    }
+    return null;
+  }
+
+  function coagulationINRValue(sec) {
+    const lines = normalizeText(sec).split('\n').map(x => x.trim()).filter(Boolean);
+    const labelRx = /R\s*\.?\s*N\s*\.?\s*I\s*\.?|\bINR\b/i;
+    for (let i = 0; i < lines.length; i++) {
+      const lm = labelRx.exec(lines[i]);
+      if (!lm) continue;
+      // Se o valor estiver na própria linha, os regex principais já o capturam.
+      // Fallback para PDF raw: "1,10 0,80 a 1,20" em uma linha e "R.N.I." na seguinte.
+      for (let j = i - 1; j >= Math.max(0, i - 2); j--) {
+        const m = lines[j].match(/^\s*(-?[0-9]+(?:[.,][0-9]+)?)\s+(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*(-?[0-9]+(?:[.,][0-9]+)?)/i);
+        if (m) return m[1];
+        const single = lines[j].match(/^\s*(-?[0-9]+(?:[.,][0-9]+)?)\s*$/);
+        if (single) return single[1];
+      }
+      for (let j = i + 1; j <= Math.min(i + 2, lines.length - 1); j++) {
+        const m = lines[j].match(/^\s*(-?[0-9]+(?:[.,][0-9]+)?)/);
+        if (m) return m[1];
+      }
+    }
+    return null;
+  }
+
+  function extractINR(text) {
+    const sec = coagulationSafeSection(text, 'TP');
+    if (!sec) return null;
+    const n = '-?[0-9]+(?:[.,][0-9]+)?';
+    let rawValue = null;
+
+    // 1,10 R.N.I. ... (o valor está imediatamente antes do rótulo).
+    let m = sec.match(new RegExp('(' + n + ')[ \t]*(?:R[ \t]*\\.?[ \t]*N[ \t]*\\.?[ \t]*I[ \t]*\\.?|\\bINR\\b)', 'i'));
+    if (m) rawValue = m[1];
+
+    // R.N.I. 1,10 ... / INR 1,10 ...
+    if (!rawValue) {
+      m = sec.match(new RegExp('(?:R[ \t]*\\.?[ \t]*N[ \t]*\\.?[ \t]*I[ \t]*\\.?|\\bINR\\b)[ \t]*[:=]?[ \t]*(' + n + ')', 'i'));
+      if (m) rawValue = m[1];
+    }
+
+    // PDF raw: o valor + referência podem vir na linha anterior ao rótulo R.N.I.
+    if (!rawValue) rawValue = coagulationINRValue(sec);
+
+    // PDF em colunas: TEMPO / ATIVIDADE / R.N.I. e, abaixo, 14,5 / 87 / 1,10.
+    if (!rawValue) {
+      const cols = coagulationColumnValues(sec, [
+        /^TEMPO\s*\(seg\)$/i,
+        /^ATIVIDADE\s*\(%\)$/i,
+        /^R\s*\.?\s*N\s*\.?\s*I\s*\.?$/i
+      ]);
+      if (cols) rawValue = cols[2];
+    }
+    if (!rawValue) return null;
+
+    const value = num(rawValue);
+    const ranges = [...sec.matchAll(/([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?)/gi)]
+      .map(x => [num(x[1]), num(x[2])]).filter(x => x.every(Number.isFinite));
+    const ref = ranges.find(([lo,hi]) => Math.min(lo,hi) <= 1 && Math.max(lo,hi) >= 1);
+    const abnormal = ref ? value < Math.min(...ref) || value > Math.max(...ref) : false;
+    return makeResult('INR', rawPt(rawValue), abnormal, {
+      sourceName:'TEMPO DE PROTROMBINA - TP', sourceOverride:sec
+    });
   }
 
   function extractTTPA(text) {
-    const sec = coagulationSection(text, 'TTPA');
+    const sec = coagulationSafeSection(text, 'TTPA');
     if (!sec) return null;
 
-    let tm = sec.match(/TEMPO\s*\(seg\)\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)\s*seg/i);
-    if (!tm) tm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:seg|s)\s*[^\n]{0,40}TEMPO\s*\(seg\)/i);
-    if (!tm) tm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*[^\n]{0,25}TEMPO\s*\(seg\)/i);
+    let timeRaw = coagulationValueNearLabel(sec, /TEMPO\s*\(\s*seg\s*\)/i, { preferAfter:true, neighbors:false });
+    let relRaw = coagulationRelationValue(sec);
 
-    let rm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)\s*([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?)/i);
-    if (!rm) rm = sec.match(/R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)(?:\s+([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?))?/i);
-    if (!rm) rm = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:R|RELA[CÇ][AÃ]O)\s*(?:\(\s*P\s*\/\s*N\s*\)|P\s*\/\s*N)/i);
+    // PDF em colunas: os dois rótulos podem vir juntos e os valores só depois.
+    if (!timeRaw || !relRaw) {
+      const cols = coagulationColumnValues(sec, [
+        /^TEMPO\s*\(\s*seg\s*\)$/i,
+        /^R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)$/i
+      ]);
+      if (cols) {
+        if (!timeRaw) timeRaw = cols[0];
+        if (!relRaw) relRaw = cols[1];
+      }
+    }
 
-    if (!tm || !rm) return null;
-    const relation = num(rm[1]);
-    const abnormal = rm[2] && rm[3]
-      ? (relation < Math.min(num(rm[2]), num(rm[3])) || relation > Math.max(num(rm[2]), num(rm[3])))
-      : false;
-    return makeResult('TTPA', `${rawPt(tm[1])}s (${rawPt(rm[1])})`, abnormal, {
+    // Layout vertical/intercalado: só tente vizinhos depois de excluir o padrão clássico em colunas.
+    if (!timeRaw) timeRaw = coagulationValueNearLabel(sec, /TEMPO\s*\(\s*seg\s*\)/i, { preferAfter:true, neighbors:true, preferPreviousNeighbor:true });
+    if (!relRaw) relRaw = coagulationValueNearLabel(sec, /R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)/i, { preferAfter:false, neighbors:true });
+
+    // Último fallback: procure os dois parâmetros em uma janela contínua, aceitando quebras de linha.
+    if (!timeRaw) {
+      const m = sec.match(/TEMPO\s*\(\s*seg\s*\)[\s\S]{0,90}?(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:seg|s)?/i);
+      if (m) timeRaw = m[1];
+    }
+    if (!relRaw) {
+      let m = sec.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)/i);
+      if (!m) m = sec.match(/R\s*\(\s*rela[cç][aã]o\s+P\s*\/\s*N\s*\)[\s\S]{0,70}?(-?[0-9]+(?:[.,][0-9]+)?)/i);
+      if (m) relRaw = m[1];
+    }
+
+    if (!timeRaw || !relRaw) return null;
+
+    const relation = num(relRaw);
+    const ranges = [...sec.matchAll(/([0-9]+(?:[.,][0-9]+)?)\s*(?:a|-)\s*([0-9]+(?:[.,][0-9]+)?)/gi)]
+      .map(x => [num(x[1]), num(x[2])]).filter(x => x.every(Number.isFinite));
+    const ref = ranges.find(([lo,hi]) => Math.min(lo,hi) <= 1 && Math.max(lo,hi) >= 1) || ranges[0];
+    const abnormal = ref ? relation < Math.min(...ref) || relation > Math.max(...ref) : false;
+    return makeResult('TTPA', `${rawPt(timeRaw)}s (${rawPt(relRaw)})`, abnormal, {
       sourceName:'TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA', sourceOverride:sec
     });
+  }
+
+  function coagulationExpected(text) {
+    const f = fold(text || '');
+    return {
+      inr: /TEMPO\s+DE\s+PROTROMBINA|\bR\s*\.?\s*N\s*\.?\s*I\s*\.?\b|\bINR\b/.test(f),
+      ttpa: /TROMBOPLASTINA\s+PARCIAL\s+ATIVAD|\bTTPA\b|RELA[CÇ][AÃ]O\s+P\s*\/\s*N/.test(f)
+    };
+  }
+
+  function isCoagulationBlock(block) {
+    const f = fold(`${block?.name || ''}\n${block?.text || ''}`);
+    return /TEMPO DE PROTROMBINA|TROMBOPLASTINA PARCIAL ATIVAD|\bTTPA\b|\bR\.?\s*N\.?\s*I\.?\b|RELA[CÇ][AÃ]O\s+P\s*\/\s*N/.test(f) ||
+      (/COAGULOMETRICO/.test(f) && /PLASMA CITRATADO/.test(f) && /TEMPO\s*\(SEG\)/.test(f));
   }
 
   function extractTSH(text) {
@@ -836,10 +1030,10 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       [/^POTASSIO$/, 'K'], [/^ALBUMINA$/, 'Alb'], [/TIROXINA LIVRE|T4 LIVRE/, 'T4L'],
       [/ASPARTATO AMINO TRANSFERASE|TGO|AST/, 'TGO'], [/ALANINA AMINO TRANSFERASE|TGP|ALT/, 'TGP'],
       [/^UREIA$/, 'Ur'], [/VITAMINA B12/, 'B12'], [/VITAMINA D.*25/, 'Vit D'],
-      [/TEMPO DE PROTROMBINA|\bR\.?\s*N\.?\s*I\.?\b|\bINR\b/, 'INR'], [/TROMBOPLASTINA PARCIAL ATIVAD|\bTTPA\b/, 'TTPA'],
       [/FATOR REUMATOIDE/, 'FR'], [/VELOCIDADE.*HEMOSSEDIMENT|HEMOSSEDIMENTACAO|\bVHS\b/, 'VHS'], [/ANTICORPOS ANTINUCLEARES|FATOR ANTINUCLEAR|\bFAN\b/, 'FAN'],
       [/TESTOSTERONA TOTAL/, 'TestoT'], [/TESTOSTERONA LIVRE/, 'TestoL'],
       [/RELACAO.*ALBUMINA.*CREATININA|ALBUMINA.*CREATININA.*URIN/, 'RAC'], [/CREATININA.*URIN|URIN.*CREATININA/, 'CrUr'], [/MICROALBUMIN/, 'Microalb'],
+      [/TEMPO DE PROTROMBINA|\bR\.?\s*N\.?\s*I\.?\b|\bINR\b/, 'INR'], [/TROMBOPLASTINA PARCIAL ATIVAD|\bTTPA\b/, 'TTPA'],
       [/ANTI[- ]?HBS/, 'Anti-HBs'], [/ANTI[- ]?HBC.*IGM/, 'Anti-HBc IgM'], [/ANTI[- ]?HBC/, 'Anti-HBc'],
       [/ANTI[- ]?HBE/, 'Anti-HBe'], [/HBEAG/, 'HBeAg'], [/ANTI[- ]?HAV.*IGM/, 'Anti-HAV IgM'], [/ANTI[- ]?HAV/, 'Anti-HAV'],
       [/ANTI[- ]?HCV/, 'Anti-HCV'], [/HBSAG|ANTIGENO.*HEPATITE B/, 'HBsAg'],
@@ -1399,7 +1593,6 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       'K':'POTÁSSIO','Alb':'ALBUMINA','T4L':'TIROXINA LIVRE - T4 LIVRE','TGO':'ASPARTATO AMINO TRANSFERASE - TGO/AST',
       'TGP':'ALANINA AMINO TRANSFERASE - TGP/ALT','Ur':'UREIA','B12':'VITAMINA B12','Vit D':'VITAMINA D - 25 HIDROXI',
       'Hb':'HEMOGRAMA COMPLETO','Ht':'HEMOGRAMA COMPLETO','VCM':'HEMOGRAMA COMPLETO','HCM':'HEMOGRAMA COMPLETO','RDW':'HEMOGRAMA COMPLETO','Leuco':'HEMOGRAMA COMPLETO','Neut':'HEMOGRAMA COMPLETO','Linf':'HEMOGRAMA COMPLETO','Mono':'HEMOGRAMA COMPLETO','Eos':'HEMOGRAMA COMPLETO','Baso':'HEMOGRAMA COMPLETO','Bast':'HEMOGRAMA COMPLETO','Meta':'HEMOGRAMA COMPLETO','Mielo':'HEMOGRAMA COMPLETO','Promielo':'HEMOGRAMA COMPLETO','GranImat':'HEMOGRAMA COMPLETO','Blastos':'HEMOGRAMA COMPLETO','Mieloblastos':'HEMOGRAMA COMPLETO','Monoblastos':'HEMOGRAMA COMPLETO','Promono':'HEMOGRAMA COMPLETO','Prolinf':'HEMOGRAMA COMPLETO','LinfAtip':'HEMOGRAMA COMPLETO','Plasm':'HEMOGRAMA COMPLETO','CélImat':'HEMOGRAMA COMPLETO','CélAtip':'HEMOGRAMA COMPLETO','Eritroblastos':'HEMOGRAMA COMPLETO','Plaq':'HEMOGRAMA COMPLETO',
-      'INR':'TEMPO DE PROTROMBINA - TP','TTPA':'TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA',
       'CT':'COLESTEROL TOTAL E FRAÇÕES','HDL':'COLESTEROL TOTAL E FRAÇÕES','LDL':'COLESTEROL TOTAL E FRAÇÕES','Trig':'COLESTEROL TOTAL E FRAÇÕES',
       'Microalb':'MICROALBUMINÚRIA'
     };
@@ -1517,6 +1710,16 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
   function textualSecondCheck(source, r) {
     const safe = auditSafeBlock(source || '');
     if (!safe) return { ok:false, reason:'Trecho-fonte não localizado.' };
+
+    if (r.abbr === 'TTPA') {
+      const fv = fold(safe);
+      const nums = String(r.value || '').match(/-?[0-9]+(?:[.,][0-9]+)?/g) || [];
+      const hasAssay = /TTPA|TROMBOPLASTINA PARCIAL ATIVAD/.test(fv);
+      const hasRelation = /RELACAO\s+P\s*\/\s*N/.test(fv);
+      const allValues = nums.length >= 2 && nums.slice(0,2).every(v => fv.includes(fold(v)));
+      if (hasAssay && hasRelation && allValues) return {ok:true,reason:''};
+      return { ok:false, reason:'A segunda checagem não confirmou simultaneamente o tempo do TTPA e a relação paciente/normal no trecho-fonte.' };
+    }
     const lines = safe.split('\n').map(x => x.trim()).filter(Boolean);
     const keyword = sourceKeywordForResult(r);
     const targetNumMatch = String(r.value || '').match(/-?[0-9]+(?:[.,][0-9]+)?/);
@@ -1667,7 +1870,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     return out;
   }
 
-  function auditReport(report, text, blocks) {
+  function auditReport(report, text, blocks, coagExpected = {inr:false, ttpa:false}) {
     const reviews = [];
     const contexts = resultContexts(report);
     let confirmed = 0;
@@ -1728,6 +1931,9 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     }
 
     // Cobertura por bloco: nenhum bloco de resultado deve desaparecer silenciosamente.
+    // TP/INR e TTPA são auditados como blocos virtuais porque o layout do HSP pode colocar
+    // "VALOR DE REFERÊNCIA" no meio do título e não é seguro submetê-los ao parser genérico.
+    const coagBlockCount = (coagExpected.inr ? 1 : 0) + (coagExpected.ttpa ? 1 : 0);
     let accountedBlocks = 0;
     const unaccounted = [];
     for (const block of blocks) {
@@ -1759,6 +1965,17 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     }
     for (const name of unaccounted) reviews.push({ label:`Bloco não compilado: ${name}`, reasons:['O laudo contém um bloco de resultado que não foi reconciliado com nenhum campo do compilado.'], trace:'' });
 
+    const hasINR = (report.blood || []).some(r => r.abbr === 'INR');
+    const hasTTPA = (report.blood || []).some(r => r.abbr === 'TTPA');
+    if (coagExpected.inr) {
+      if (hasINR) accountedBlocks++;
+      else reviews.push({ label:'Bloco não compilado: Tempo de Protrombina / INR', reasons:['O laudo contém TP/RNI, mas o INR não foi reconciliado com o compilado.'], trace:'' });
+    }
+    if (coagExpected.ttpa) {
+      if (hasTTPA) accountedBlocks++;
+      else reviews.push({ label:'Bloco não compilado: TTPA', reasons:['O laudo contém TTPA/relação P/N, mas o tempo e a relação paciente/normal não foram reconciliados com o compilado.'], trace:'' });
+    }
+
     if (report.urine?.u1?.parsed) {
       const strict = assessUrineStrict(text, report.urine.u1);
       report.urine.u1.canDeclareNormal = strict.canDeclareNormal;
@@ -1783,7 +2000,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       reviewCount: dedup.length,
       referenceClassified,
       piiClear,
-      blockCount: blocks.length,
+      blockCount: blocks.length + coagBlockCount,
       accountedBlocks,
       reviews: dedup,
       sanitized: true
@@ -1792,11 +2009,17 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
   }
 
   function compileReport(rawText) {
-    const text = anonymizeText(rawText);
-    if (!text.trim()) return { date: null, blood: [], gas: [], urine: { u1:null, assays:[] }, csf: [], pleural: [], serology: [], cultures: [] };
+    const raw = normalizeText(rawText);
+    const coagExpected = coagulationExpected(raw);
+    const rawINR = extractINR(raw);
+    const rawTTPA = extractTTPA(raw);
+    const text = anonymizeText(raw);
+    if (!text.trim() && !rawINR && !rawTTPA) return { date: null, blood: [], gas: [], urine: { u1:null, assays:[] }, csf: [], pleural: [], serology: [], cultures: [] };
 
     const found = {};
     const assign = (r) => { if (r && r.abbr) found[r.abbr] = r; };
+    assign(rawINR || extractINR(text));
+    assign(rawTTPA || extractTTPA(text));
     assign(extractUric(text));
     assign(extractCalcium(text));
     assign(extractIonizedCalcium(text));
@@ -1816,8 +2039,6 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     assign(extractUrea(text));
     assign(extractB12(text));
     assign(extractVitD(text));
-    assign(extractINR(text));
-    assign(extractTTPA(text));
     Object.assign(found, extractHemogram(text));
     const standaloneTrig = extractTrigStandalone(text);
     if (!found.Trig && standaloneTrig) assign(standaloneTrig);
@@ -1832,7 +2053,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     const serology = [];
     const cultures = [];
 
-    const blocks = assayBlocks(text);
+    const blocks = assayBlocks(text).filter(block => !isCoagulationBlock(block));
     const panelNames = /HEMOGRAMA COMPLETO|COLESTEROL TOTAL E FRACOES|URINA TIPO I/;
     for (const block of blocks) {
       const bn = fold(block.name);
@@ -1892,8 +2113,8 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     }
 
     const orderedSerology = orderSerology(serology);
-    const report = { date: compactDate(text), blood, gas, urine, csf, pleural, serology: orderedSerology, cultures };
-    return auditReport(report, text, blocks);
+    const report = { date: compactDate(text) || compactDate(raw), blood, gas, urine, csf, pleural, serology: orderedSerology, cultures };
+    return auditReport(report, text, blocks, coagExpected);
   }
 
   function tokenText(r) {
@@ -2197,39 +2418,103 @@ Coleta:06/04/2026 11:48`);
     check('Metamielócitos permanecem distintos de mielócitos', hemogramShiftPositive.blood.some(x => x.abbr === 'Meta' && /60/.test(x.value)));
     check('Blastos detectados são sempre exibidos', hemogramShiftPositive.blood.some(x => x.abbr === 'Blastos' && /12/.test(x.value)));
 
-    const coag = compileReport(`VALOR DE REFERÊNCIATEMPO DE PROTROMBINA - TP
-Método: COAGULOMÉTRICO
-PLASMA CITRATADOMaterial:
-TEMPO (seg) 14,5 seg
-87 ATIVIDADE (%) Superior a 70 %
-1,10 R.N.I. 0,80 a 1,20
-Coleta:18/08/2026 13:57
-VALOR DE REFERÊNCIATEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA
-Método: COAGULOMÉTRICO
-PLASMA CITRATADOMaterial:
-TEMPO (seg) 33,6 seg
-1,00 R (relação P/N) 0,80 a 1,20
-Coleta:18/08/2026 13:57`);
-    const inr = coag.blood.find(x => x.abbr === 'INR');
-    const ttpa = coag.blood.find(x => x.abbr === 'TTPA');
-    check('TP compila apenas INR', !!inr && inr.value === '1,10' && !coag.blood.some(x => x.abbr === 'TP'));
-    check('TTPA compila tempo e relação P/N', !!ttpa && ttpa.value === '33,6s (1,00)');
-    check('Coagulograma normal não gera pendência', !!inr && !!ttpa && !inr.needsReview && !ttpa.needsReview);
-
-    const coagPdfOrder = compileReport(`TEMPO DE PROTROMBINA - TP VALOR DE REFERÊNCIA
+    const coagHsp = compileReport(`TEMPO DE PROTROMBINA - TP VALOR DE REFERÊNCIA
 Método: COAGULOMÉTRICO
 Material: PLASMA CITRATADO
 TEMPO (seg) 14,5 seg
 87 ATIVIDADE (%) % Superior a 70 %
 1,10 R.N.I. 0,80 a 1,20
-Liberado eletronicamente: TESTE 18/08/2026 14:26:22 Coleta:18/08/2026 13:57
-TEMPO DE VALOR DE REFERÊNCIA TROMBOPLASTINA PARCIAL ATIVADO - TTPA
+Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 18/08/2026 14:26:22 Coleta:18/08/2026 13:57
+TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA VALOR DE REFERÊNCIA
 Método: COAGULOMÉTRICO
 Material: PLASMA CITRATADO
 TEMPO (seg) 33,6 seg
 1,00 R (relação P/N) 0,80 a 1,20
-Liberado eletronicamente: TESTE 18/08/2026 14:26:23 Coleta:18/08/2026 13:57`);
-    check('Coagulograma tolera ordem textual do PDF', coagPdfOrder.blood.some(x => x.abbr === 'INR' && x.value === '1,10') && coagPdfOrder.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 18/08/2026 14:26:23 Coleta:18/08/2026 13:57`);
+    check('Coagulograma HSP compila INR', coagHsp.blood.some(x => x.abbr === 'INR' && x.value === '1,10'));
+    check('Coagulograma HSP compila TTPA', coagHsp.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+    check('Coagulograma HSP não gera pendência', !coagHsp.qa?.reviews.some(x => /PROTROMB|TROMBOPLAST|TTPA|INR|R\.N\.I/i.test(x.label + ' ' + x.reasons.join(' '))));
+
+    const coagOneLine = compileReport(`HOSPITAL SÃO PAULO Sr (a): PACIENTE TESTE Dt. Nasc.: 01/01/1940 TEMPO DE PROTROMBINA - TP VALOR DE REFERÊNCIA Método: COAGULOMÉTRICO Material: PLASMA CITRATADO TEMPO (seg) 14,5 seg ATIVIDADE (%) 87 % Superior a 70 % R.N.I. 1,10 0,80 a 1,20 Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 Coleta:18/08/2026 13:57 Hash: ABC TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA VALOR DE REFERÊNCIA Método: COAGULOMÉTRICO Material: PLASMA CITRATADO TEMPO (seg) 33,6 seg R (relação P/N) 1,00 0,80 a 1,20 Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 Coleta:18/08/2026 13:57`);
+    check('Coagulograma em linha única preserva INR', coagOneLine.blood.some(x => x.abbr === 'INR' && x.value === '1,10'));
+    check('Coagulograma em linha única preserva TTPA', coagOneLine.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+    check('Coagulograma em linha única não gera pendência', !coagOneLine.qa?.reviews.some(x => /PROTROMB|TROMBOPLAST|TTPA|INR|R\.N\.I/i.test(x.label + ' ' + x.reasons.join(' '))));
+
+
+    const coagVertical = compileReport(`TEMPO DE PROTROMBINA - TP VALOR DE REFERÊNCIA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+R.N.I.
+1,10
+0,80 a 1,20
+Liberado eletronicamente: TESTE
+TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA VALOR DE REFERÊNCIA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+TEMPO (seg)
+33,6 seg
+R (relação P/N)
+1,00
+0,80 a 1,20
+Liberado eletronicamente: TESTE
+Coleta:18/08/2026 13:57`);
+    check('TTPA vertical compila tempo e relação', coagVertical.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+    check('TTPA vertical sem pendência', !coagVertical.qa?.reviews.some(x => /TTPA|TROMBOPLAST/i.test(x.label + ' ' + x.reasons.join(' '))));
+
+    const coagInterleaved = compileReport(`TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA VALOR DE REFERÊNCIA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+TEMPO (seg)
+33,6 seg
+R (relação P/N) 1,00 0,80 a 1,20
+Coleta:18/08/2026 13:57`);
+    check('TTPA intercalado compila', coagInterleaved.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+
+    const coagPureColumns = compileReport(`TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA VALOR DE REFERÊNCIA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+TEMPO (seg)
+R (relação P/N)
+33,6
+1,00
+0,80 a 1,20
+Coleta:18/08/2026 13:57`);
+    check('TTPA em colunas puras não troca relação pelo tempo', coagPureColumns.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+
+    const coagRawPdfOrder = compileReport(`VALOR DE REFERÊNCIA
+TEMPO DE PROTROMBINA - TP
+COAGULOMÉTRICO
+Método:
+PLASMA CITRATADO
+Material:
+14,5
+TEMPO (seg) seg
+87 Superior a 70 %
+ATIVIDADE (%) %
+1,10 0,80 a 1,20
+R.N.I.
+Liberado eletronicamente: TESTE Coleta:18/08/2026 13:57
+VALOR DE REFERÊNCIA
+TEMPO DE TROMBOPLASTINA PARCIALATIVADO - TTPA
+COAGULOMÉTRICO
+Método:
+PLASMA CITRATADO
+Material:
+33,6
+TEMPO (seg) seg
+1,00 0,80 a 1,20
+R (relação P/N)
+Liberado eletronicamente: TESTE Coleta:18/08/2026 13:57`);
+    check('Coagulograma na ordem raw do PDF compila INR', coagRawPdfOrder.blood.some(x => x.abbr === 'INR' && x.value === '1,10'));
+    check('Coagulograma na ordem raw do PDF compila TTPA', coagRawPdfOrder.blood.some(x => x.abbr === 'TTPA' && x.value === '33,6s (1,00)'));
+    check('Coagulograma raw não gera pendência de TP/TTPA', !coagRawPdfOrder.qa?.reviews.some(x => /TTPA|TROMBOPLAST|INR|PROTROMB/i.test(x.label + ' ' + x.reasons.join(' '))));
+
+    const coagMissingMustReview = compileReport(`TEMPO DE TROMBOPLASTINA PARCIAL ATIVADO - TTPA VALOR DE REFERÊNCIA
+Método: COAGULOMÉTRICO
+Material: PLASMA CITRATADO
+resultado ilegível
+Coleta:18/08/2026 13:57`);
+    check('TTPA presente mas não extraído obrigatoriamente gera pendência', coagMissingMustReview.qa?.reviews.some(x => /Bloco não compilado: TTPA/i.test(x.label)));
 
     return { passed: total - failures.length, total, failures };
   }
