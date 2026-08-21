@@ -202,7 +202,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
 
   const BLOOD_ORDER = [
     'AcUr','CaT','CaIon','CT','HDL','LDL','Trig','Cr','CK','FA','Glic','HbA1c','TSH',
-    'PTH','K','Alb','T4L','TGO','TGP','Ur','B12','Vit D','Hb','Ht','VCM','HCM','RDW','Leuco',
+    'PTH','K','Alb','T4L','TGO','TGP','Ur','B12','Ferritina','Transferrina','IST','Vit D','Hb','Ht','VCM','HCM','RDW','Leuco',
     'Neut','Linf','Mono','Eos','Baso','Bast','Meta','Mielo','Promielo','GranImat','Blastos',
     'Mieloblastos','Monoblastos','Promono','Prolinf','LinfAtip','Plasm','CélImat','CélAtip','Eritroblastos','Plaq','INR','TTPA'
   ];
@@ -607,6 +607,98 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     const f = fold(`${block?.name || ''}\n${block?.text || ''}`);
     return /TEMPO DE PROTROMBINA|TROMBOPLASTINA PARCIAL ATIVAD|\bTTPA\b|\bR\.?\s*N\.?\s*I\.?\b|RELA[CÇ][AÃ]O\s+P\s*\/\s*N/.test(f) ||
       (/COAGULOMETRICO/.test(f) && /PLASMA CITRATADO/.test(f) && /TEMPO\s*\(SEG\)/.test(f));
+  }
+
+
+  function rawAssaySection(text, headingPatterns) {
+    const raw = normalizeText(text);
+    let best = null;
+    for (const rx of headingPatterns) {
+      const m = rx.exec(raw);
+      if (m && (!best || m.index < best.index)) best = { index:m.index, match:m[0] };
+    }
+    if (!best) return '';
+    const start = best.index;
+    const searchFrom = start + best.match.length;
+    const endCandidates = [
+      raw.indexOf('Liberado eletronicamente:', searchFrom),
+      raw.indexOf('Liberação eletrônica', searchFrom),
+      raw.indexOf('\nHash:', searchFrom),
+      raw.indexOf('\nHOSPITAL SÃO PAULO', searchFrom),
+      raw.indexOf('VALOR DE REFERÊNCIA', searchFrom),
+      raw.indexOf('VALOR REFERÊNCIA', searchFrom),
+      raw.indexOf('VALOR DE REFERENCIA', searchFrom),
+      raw.indexOf('VALOR REFERENCIA', searchFrom)
+    ].filter(i => i >= 0);
+    const end = endCandidates.length ? Math.min(...endCandidates) : Math.min(raw.length, start + 1800);
+    return auditSafeBlock(raw.slice(start, end));
+  }
+
+  function resultNearMarker(sectionText, unitPattern) {
+    const b = normalizeText(sectionText || '');
+    const n = '(-?[0-9]+(?:[.,][0-9]+)?)';
+    const unit = unitPattern || '[^\\s]+';
+    let m = b.match(new RegExp('(?:^|\\n)\\s*' + n + '\\s+RESULTADO\\s*' + unit, 'i'));
+    if (m) return m[1];
+    m = b.match(new RegExp('RESULTADO\\s*' + n + '\\s*' + unit, 'i'));
+    if (m) return m[1];
+    m = b.match(new RegExp('RESULTADO\\s*' + unit + '\\s*' + n, 'i'));
+    if (m) return m[1];
+    m = b.match(new RegExp('(?:^|\\n)\\s*' + n + '\\s+' + n + '\\s*(?:a|-)\\s*' + n + '\\s*' + unit + '[^\\n]{0,80}?RESULTADO', 'i'));
+    if (m) return m[1];
+    return null;
+  }
+
+  function makeRawNumericAssay(abbr, sourceName, sec, rawValue) {
+    if (!sec || !rawValue) return null;
+    const parsed = { display:rawPt(rawValue), numeric:num(rawValue) };
+    if (!Number.isFinite(parsed.numeric)) return null;
+    return makeResult(abbr, parsed.display, genericAbnormal(sec, parsed), {
+      sourceName,
+      sourceOverride:sec,
+      generic:false,
+      rawSpecific:true
+    });
+  }
+
+  function extractFerritin(text) {
+    const sec = rawAssaySection(text, [
+      /(?:^|\n)\s*FERRITINA\b[^\n]{0,1000}VALOR\s+(?:DE\s+)?REFER[ÊE]NCIA/i,
+      /VALOR\s+(?:DE\s+)?REFER[ÊE]NCIA\s*FERRITINA\b/i
+    ]);
+    if (!sec) return null;
+    const rawValue = resultNearMarker(sec, 'ng\\/mL');
+    return makeRawNumericAssay('Ferritina', 'FERRITINA', sec, rawValue);
+  }
+
+  function extractTransferrin(text) {
+    const sec = rawAssaySection(text, [
+      /(?:^|\n)\s*TRANSFERRINA\b[^\n]{0,1000}VALOR\s+(?:DE\s+)?REFER[ÊE]NCIA/i,
+      /VALOR\s+(?:DE\s+)?REFER[ÊE]NCIA\s*TRANSFERRINA(?:\s|\n|$)/i
+    ]);
+    if (!sec) return null;
+    const rawValue = resultNearMarker(sec, 'mg\\/dL');
+    return makeRawNumericAssay('Transferrina', 'TRANSFERRINA', sec, rawValue);
+  }
+
+  function extractTransferrinSaturation(text) {
+    const sec = rawAssaySection(text, [
+      /(?:^|\n)\s*[ÍI]NDICE\s+DE\s+SATURA[CÇ][ÃA]O\s+DE\s+TRANSFERRINA\b[^\n]{0,1000}VALOR\s+(?:DE\s+)?REFER[ÊE]NCIA/i,
+      /VALOR\s+(?:DE\s+)?REFER[ÊE]NCIA\s*[ÍI]NDICE\s+DE\s+SATURA[CÇ][ÃA]O\s+DE\s+TRANSFERRINA\b/i
+    ]);
+    if (!sec) return null;
+    let m = sec.match(/(?:^|\n)\s*(-?[0-9]+(?:[.,][0-9]+)?)\s+[ÍI]NDICE\s*%/i);
+    if (!m) m = sec.match(/(?:^|\n)\s*[ÍI]NDICE\s+(-?[0-9]+(?:[.,][0-9]+)?)\s*%/i);
+    if (!m) m = sec.match(/\b[ÍI]NDICE\s*[:=]?\s*(-?[0-9]+(?:[.,][0-9]+)?)\s*%/i);
+    if (!m) return null;
+    const rawValue = m[1];
+    const parsed = { display:rawPt(rawValue), numeric:num(rawValue) };
+    return makeResult('IST', `${parsed.display}%`, genericAbnormal(sec, parsed), {
+      sourceName:'ÍNDICE DE SATURAÇÃO DE TRANSFERRINA',
+      sourceOverride:sec,
+      generic:false,
+      rawSpecific:true
+    });
   }
 
   function extractTSH(text) {
@@ -1051,10 +1143,25 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     const starts = [];
     let m;
     while ((m = rx.exec(raw)) !== null) {
-      const lineEnd = raw.indexOf('\n', m.endIndex || rx.lastIndex);
-      const end = lineEnd >= 0 ? lineEnd : raw.length;
-      const name = raw.slice(rx.lastIndex, end).trim();
-      if (name) starts.push({ index: m.index, bodyStart: rx.lastIndex, name, lineEnd: end });
+      const lineStart = raw.lastIndexOf('\n', Math.max(0, m.index - 1)) + 1;
+      const before = raw.slice(lineStart, m.index).trim();
+      const beforeLooksLikeTitle = !!before &&
+        before.length <= 180 &&
+        !/(RESULTADO|MATERIAL:|M[EÉ]TODO:|METODO:|COLETA:|HASH:|LIBERADO|RESPONS[AÁ]VEIS?)/i.test(before);
+
+      let name = '';
+      let index = m.index;
+      let lineEnd = raw.indexOf('\n', rx.lastIndex);
+      if (lineEnd < 0) lineEnd = raw.length;
+
+      if (beforeLooksLikeTitle) {
+        name = before;
+        index = lineStart;
+      } else {
+        name = raw.slice(rx.lastIndex, lineEnd).trim();
+      }
+
+      if (name) starts.push({ index, markerIndex:m.index, bodyStart:rx.lastIndex, name, lineEnd });
     }
     return starts.map((x, i) => ({
       name: x.name,
@@ -1082,7 +1189,8 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       [/^POTASSIO$/, 'K'], [/^SODIO$/, 'Na'], [/^ALBUMINA$/, 'Alb'], [/TIROXINA LIVRE|T4 LIVRE/, 'T4L'],
       [/ASPARTATO AMINO TRANSFERASE|TGO|AST/, 'TGO'], [/ALANINA AMINO TRANSFERASE|TGP|ALT/, 'TGP'],
       [/GAMA GLUTAMIL TRANSFERASE|\bGGT\b/, 'GGT'], [/^FOSFORO$/, 'P'], [/^MAGNESIO$/, 'Mg'],
-      [/^UREIA$/, 'Ur'], [/VITAMINA B12/, 'B12'], [/VITAMINA D.*25/, 'Vit D'],
+      [/^UREIA$/, 'Ur'], [/VITAMINA B12/, 'B12'], [/^FERRITINA$/, 'Ferritina'], [/^TRANSFERRINA$/, 'Transferrina'],
+      [/INDICE DE SATURACAO DE TRANSFERRINA|SATURACAO DE TRANSFERRINA/, 'IST'], [/VITAMINA D.*25/, 'Vit D'],
       [/FATOR REUMATOIDE/, 'FR'], [/VELOCIDADE.*HEMOSSEDIMENT|HEMOSSEDIMENTACAO|\bVHS\b/, 'VHS'], [/ANTICORPOS ANTINUCLEARES|FATOR ANTINUCLEAR|\bFAN\b/, 'FAN'],
       [/TESTOSTERONA TOTAL/, 'TestoT'], [/TESTOSTERONA LIVRE/, 'TestoL'],
       [/RELACAO.*ALBUMINA.*CREATININA|ALBUMINA.*CREATININA.*URIN/, 'RAC'], [/CREATININA.*URIN|URIN.*CREATININA/, 'CrUr'], [/MICROALBUMIN/, 'Microalb'],
@@ -1626,7 +1734,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       'AcUr':'ACIDO URICO','CaT':'CALCIO TOTAL','CaIon':'CALCIO ION','CT':'COLESTEROL TOTAL','HDL':'COLESTEROL HDL','LDL':'COLESTEROL LDL','Trig':'TRIGLICER',
       'Cr':'CREATININA','CK':'CREATINOFOSFOQUINASE','FA':'FOSFATASE ALCALINA','Glic':'GLICOSE','HbA1c':'HEMOGLOBINA GLICADA',
       'TSH':'HORMONIO TIREOESTIMULANTE','PTH':'PARATORMONIO','K':'POTASSIO','Alb':'ALBUMINA','T4L':'TIROXINA LIVRE',
-      'TGO':'ASPARTATO AMINO','TGP':'ALANINA AMINO','Na':'SODIO','GGT':'GAMA GLUTAMIL','P':'FOSFORO','Mg':'MAGNESIO','Prot':'PROTEINAS TOTAIS','Albumina':'ALBUMINA','Globulina':'GLOBULINA','BT':'BILIRRUBINA TOTAL','BD':'BILIRRUBINA DIRETA','BI':'BILIRRUBINA INDIRETA','Ur':'UREIA','B12':'VITAMINA B12','Vit D':'VITAMINA D',
+      'TGO':'ASPARTATO AMINO','TGP':'ALANINA AMINO','Na':'SODIO','GGT':'GAMA GLUTAMIL','P':'FOSFORO','Mg':'MAGNESIO','Prot':'PROTEINAS TOTAIS','Albumina':'ALBUMINA','Globulina':'GLOBULINA','BT':'BILIRRUBINA TOTAL','BD':'BILIRRUBINA DIRETA','BI':'BILIRRUBINA INDIRETA','Ur':'UREIA','B12':'VITAMINA B12','Ferritina':'FERRITINA','Transferrina':'TRANSFERRINA','IST':'INDICE DE SATURACAO DE TRANSFERRINA','Vit D':'VITAMINA D',
       'Hb':'HEMOGLOBINA','Ht':'HEMATOCRITO','VCM':'VCM','HCM':'HCM','RDW':'RDW','Leuco':'LEUCOCITOS','Neut':'NEUTROFILOS','Linf':'LINFOCITOS','Mono':'MONOCITOS','Eos':'EOSINOFILOS','Baso':'BASOFILOS','Bast':'BASTONETES','Meta':'METAMIELOCITOS','Mielo':'MIELOCITOS','Promielo':'PROMIELOCITOS','GranImat':'GRANULOCITOS IMATUROS','Blastos':'BLASTOS','Mieloblastos':'MIELOBLASTOS','Monoblastos':'MONOBLASTOS','Promono':'PROMONOCITOS','Prolinf':'PROLINFOCITOS','LinfAtip':'LINFOCITOS','Plasm':'PLASMOCITOS','CélImat':'CELULAS IMATURAS','CélAtip':'CELULAS ATIPICAS','Eritroblastos':'ERITROBLASTOS','Plaq':'PLAQUETAS','INR':'R.N.I','TTPA':'TTPA','Microalb':'MICROALBUMIN','CrUr':'CREATININA',
       'VHS':'HEMOSSEDIMENT','FR':'FATOR REUMATOIDE','FAN':'FAN','TestoT':'TESTOSTERONA TOTAL','TestoL':'TESTOSTERONA LIVRE',
       'RAC':'RELACAO ALBUMINA/CREATININA','Cél':'CELULAS','Hemác':'HEMACIAS','Prot':'PROTEINA','Lact':'LACTATO','LDH':'LDH','ADA':'ADA',
@@ -2075,6 +2183,9 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
     const assign = (r) => { if (r && r.abbr) found[r.abbr] = r; };
     assign(rawINR || extractINR(text));
     assign(rawTTPA || extractTTPA(text));
+    assign(extractFerritin(raw) || extractFerritin(text));
+    assign(extractTransferrin(raw) || extractTransferrin(text));
+    assign(extractTransferrinSaturation(raw) || extractTransferrinSaturation(text));
     assign(extractUric(text));
     assign(extractCalcium(text));
     assign(extractIonizedCalcium(text));
@@ -2636,6 +2747,49 @@ Coleta:21/07/2026 07:42`);
     check('Bilirrubina direta vira BD', bilirubinPanel.blood.some(x => x.abbr === 'BD' && x.value === '0,28'));
     check('Bilirrubina indireta vira BI', bilirubinPanel.blood.some(x => x.abbr === 'BI' && x.value === '0,23'));
     check('Painel de bilirrubinas não gera pendência de bloco', !bilirubinPanel.qa?.reviews.some(x => /BILIRRUBINAS TOTAIS E FRACOES/.test(fold(x.label + ' ' + x.reasons.join(' ')))));
+
+
+    const ironStudies = compileReport(`VALOR DE REFERÊNCIAFERRITINA
+Metodo: IMUNOTURBIDIMÉTRICO
+Material: SORO
+RESULTADO 25.2 ng/mL 15 a 150 ng/mL
+Coleta:14/08/2026 11:31
+VALOR DE REFERÊNCIA ÍNDICE DE SATURAÇÃO DE TRANSFERRINA
+Método: CALCULADO
+Material: SORO
+25,8 ÍNDICE % 20 a 50%
+COMENTÁRIOS
+Para resultados de Ferritina > 1200 ng/mL, não deve ser utilizado o cálculo de Saturação de transferrina.
+Coleta:14/08/2026 11:31
+VALOR DE REFERÊNCIATRANSFERRINA
+Método: IMUNOTURBIDIMÉTRICO
+Material: SORO
+301 RESULTADO mg/dL 200 a 360 mg/dL
+Coleta:14/08/2026 11:31`);
+    check('Ferritina usa o resultado e não a referência', ironStudies.blood.some(x => x.abbr === 'Ferritina' && x.value === '25,2'));
+    check('Transferrina recebe nome padronizado', ironStudies.blood.some(x => x.abbr === 'Transferrina' && x.value === '301'));
+    check('IST recebe abreviação e porcentagem', ironStudies.blood.some(x => x.abbr === 'IST' && x.value === '25,8%'));
+    check('IST não usa Ferritina 1200 do comentário', !ironStudies.blood.some(x => x.abbr === 'IST' && /1200/.test(x.value)));
+    check('Estudos de ferro reconciliados sem pendência', !ironStudies.qa?.reviews.some(x => /FERRITINA|TRANSFERRINA|SATURACAO/.test(fold(x.label + ' ' + x.reasons.join(' ')))));
+
+    const ironStudiesHeadingBeforeReference = compileReport(`FERRITINA VALOR DE REFERÊNCIA
+Metodo: IMUNOTURBIDIMÉTRICO
+Material: SORO
+RESULTADO 25.2 ng/mL 15 a 150 ng/mL
+Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 14/08/2026 16:27:40 Coleta:14/08/2026 11:31
+ÍNDICE DE SATURAÇÃO DE TRANSFERRINA VALOR DE REFERÊNCIA
+Método: CALCULADO
+Material: SORO
+ÍNDICE 25,8 % 20 a 50%
+Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 14/08/2026 16:27:41 Coleta:14/08/2026 11:31
+TRANSFERRINA VALOR DE REFERÊNCIA
+Método: IMUNOTURBIDIMÉTRICO
+Material: SORO
+RESULTADO 301 mg/dL 200 a 360 mg/dL
+Liberado eletronicamente: PROFISSIONAL TESTE CRBM 0000 14/08/2026 16:27:42 Coleta:14/08/2026 11:31`);
+    check('Ferritina funciona com título antes de VALOR DE REFERÊNCIA', ironStudiesHeadingBeforeReference.blood.some(x => x.abbr === 'Ferritina' && x.value === '25,2'));
+    check('IST funciona com título antes de VALOR DE REFERÊNCIA', ironStudiesHeadingBeforeReference.blood.some(x => x.abbr === 'IST' && x.value === '25,8%'));
+    check('Transferrina funciona com título antes de VALOR DE REFERÊNCIA', ironStudiesHeadingBeforeReference.blood.some(x => x.abbr === 'Transferrina' && x.value === '301'));
 
     const coagHspReferenceBeforeLabel = compileReport(`VALOR DE REFERÊNCIATEMPO DE PROTROMBINA - TP
 PLASMA CITRATADOMaterial:
