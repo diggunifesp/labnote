@@ -234,8 +234,8 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
   function anonymizeText(input) {
     let raw = normalizeText(input);
 
-    // Remove cabeçalhos repetidos antes do primeiro conteúdo analítico de cada página.
-    raw = raw.replace(/HOSPITAL S[ÃA]O PAULO[\s\S]*?(?=(?:VALOR DE REFER[ÊE]NCIA|CARACTER[ÍI]STICAS DA PUN[ÇC][ÃA]O))/gi, '');
+    // Remove cabeçalhos repetidos, preservando o título na linha do valor de referência.
+    raw = raw.replace(/HOSPITAL S[ÃA]O PAULO[\s\S]*?(?=(?:^[^\n]{0,180}VALOR DE REFER[ÊE]NCIA|VALOR DE REFER[ÊE]NCIA|CARACTER[ÍI]STICAS DA PUN[ÇC][ÃA]O))/gim, '');
 
     const safeLines = [];
     for (const originalLine of raw.split('\n')) {
@@ -1187,7 +1187,7 @@ kbd { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(2
       [/GLICOSE DE JEJUM|^GLICOSE$/, 'Glic'], [/HEMOGLOBINA GLICADA|HBA1C/, 'HbA1c'],
       [/HORMONIO TIREOESTIMULANTE|\bTSH\b/, 'TSH'], [/PARATORMONIO|\bPTH\b/, 'PTH'],
       [/^POTASSIO$/, 'K'], [/^SODIO$/, 'Na'], [/^ALBUMINA$/, 'Alb'], [/TIROXINA LIVRE|T4 LIVRE/, 'T4L'],
-      [/ASPARTATO AMINO TRANSFERASE|TGO|AST/, 'TGO'], [/ALANINA AMINO TRANSFERASE|TGP|ALT/, 'TGP'],
+      [/ASPARTATO AMINO TRANSFERASE|\b(?:TGO|AST)\b/, 'TGO'], [/ALANINA AMINO TRANSFERASE|\b(?:TGP|ALT)\b/, 'TGP'],
       [/GAMA GLUTAMIL TRANSFERASE|\bGGT\b/, 'GGT'], [/^FOSFORO$/, 'P'], [/^MAGNESIO$/, 'Mg'],
       [/^UREIA$/, 'Ur'], [/VITAMINA B12/, 'B12'], [/^FERRITINA$/, 'Ferritina'], [/^TRANSFERRINA$/, 'Transferrina'],
       [/INDICE DE SATURACAO DE TRANSFERRINA|SATURACAO DE TRANSFERRINA/, 'IST'], [/VITAMINA D.*25/, 'Vit D'],
@@ -2804,6 +2804,21 @@ PLASMA CITRATADOMaterial:
 Coleta:21/07/2026 07:42`);
     check('INR HSP não confunde resultado com limite superior', coagHspReferenceBeforeLabel.blood.some(x => x.abbr === 'INR' && x.value === '0,94'));
     check('TTPA HSP não confunde relação com limite superior', coagHspReferenceBeforeLabel.blood.some(x => x.abbr === 'TTPA' && x.value === '32,9s (0,98)'));
+
+    const troponinHighSensitivity = compileReport(`HOSPITAL SÃO PAULO
+LABORATÓRIO CENTRAL
+Sr (a): PACIENTE TESTE
+TROPONINA T - ALTA SENSIBILIDADE VALOR DE REFERÊNCIA
+Método: ELETROQUIMIOLUMINESCÊNCIA (ECLIA)
+Material: SORO
+RESULTADO 14 pg/mL Até 14 pg/mL
+Resultados Anteriores:01/06/25 (31)01/06/25 (29)31/05/25 (25)
+Coleta:02/10/2026 22:38`);
+    check('Troponina de alta sensibilidade preserva nome e resultado', troponinHighSensitivity.blood.some(x => x.abbr === 'TROPONINA T - ALTA SENSIBILIDADE' && x.value === '14'));
+    check('ALTA SENSIBILIDADE não é interpretada como ALT/TGP', !troponinHighSensitivity.blood.some(x => x.abbr === 'TGP' || x.abbr === 'TGO'));
+    check('ALT e TGP isoladas continuam reconhecidas', ['ALT', 'TGP', 'TGP/ALT', 'ALANINA AMINO TRANSFERASE - TGP/ALT'].every(x => aliasForName(x) === 'TGP'));
+    check('AST e TGO isoladas continuam reconhecidas', ['AST', 'TGO', 'TGO/AST', 'ASPARTATO AMINO TRANSFERASE - TGO/AST'].every(x => aliasForName(x) === 'TGO'));
+    check('AST dentro de outra palavra não é TGO', aliasForName('ELASTASE') === 'ELASTASE');
 
     return { passed: total - failures.length, total, failures };
   }
